@@ -4,6 +4,7 @@ import html
 import pathlib
 import re
 import time
+from urllib.parse import urljoin
 
 from selenium import webdriver
 from selenium.common.exceptions import TimeoutException
@@ -11,69 +12,95 @@ from selenium.webdriver.chrome.options import Options
 
 OUT = pathlib.Path("keflavik-basket.ics")
 TARGET_SEASON = "2026-2027"
-SOURCE = (
+LEAGUE_URL = (
     "https://www.kki.is/motamal/leikir-og-urslit/"
     "motayfirlit/Leikir?league_id=190&season_id=undefined"
 )
 
 
 def clean(value):
+    # Script/style contents can sit inside table cells on KKÍ; remove the
+    # entire elements before stripping the remaining HTML tags.
+    value = re.sub(
+        r"<(script|style)\b[^>]*>.*?</\1>",
+        " ",
+        value,
+        flags=re.I | re.S,
+    )
     value = re.sub(r"<br\s*/?>", " ", value, flags=re.I)
     value = re.sub(r"<[^>]+>", " ", value)
     return " ".join(html.unescape(value).replace("\xa0", " ").split())
 
 
-def render_current_games_page():
+def make_driver():
     options = Options()
     options.add_argument("--headless=new")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-gpu")
     options.add_argument("--disable-dev-shm-usage")
-    options.add_argument("--window-size=1440,1200")
+    options.add_argument("--window-size=1440,1600")
     options.add_argument("--lang=is-IS")
     options.page_load_strategy = "eager"
 
     driver = webdriver.Chrome(options=options)
     driver.set_page_load_timeout(25)
+    return driver
 
+
+def load_and_wait(driver, url, required_strings):
     try:
+        driver.get(url)
+    except TimeoutException:
         try:
-            driver.get(SOURCE)
-        except TimeoutException:
+            driver.execute_script("window.stop();")
+        except Exception:
+            pass
+
+    page = ""
+    last_date_count = -1
+    stable_count = 0
+
+    for _ in range(30):
+        page = driver.page_source
+        text = clean(page)
+        date_count = len(
+            re.findall(r"\d{2}[-.]\d{2}[-.]20\d{2}\s+\d{1,2}:\d{2}", text)
+        )
+
+        ready = all(required in text for required in required_strings)
+        if ready and date_count > 0:
+            # Give KKÍ's JS enough time to finish adding rows. Returning only
+            # when the number of dated rows has stopped changing avoids taking
+            # a partial snapshot of the schedule.
             try:
-                driver.execute_script("window.stop();")
+                driver.execute_script(
+                    "window.scrollTo(0, document.body.scrollHeight);"
+                )
             except Exception:
                 pass
 
-        page = ""
-        for _ in range(20):
-            page = driver.page_source
-            text = clean(page)
-            if (
-                "Bónus deild karla" in text
-                and TARGET_SEASON in text
-                and "Keflavík" in text
-                and re.search(r"\d{2}[-.]\d{2}[-.]20\d{2}", text)
-            ):
+            if date_count == last_date_count:
+                stable_count += 1
+            else:
+                stable_count = 0
+
+            if stable_count >= 3:
                 return page
-            time.sleep(1)
 
-        print("Rendered page title:", driver.title)
-        print("Rendered URL:", driver.current_url)
-        print("Rendered text sample:", clean(page)[:1500])
-        raise SystemExit(
-            "KKÍ did not render current Bónus deild karla games. "
-            "Calendar will NOT be overwritten."
-        )
-    finally:
-        driver.quit()
+        last_date_count = date_count
+        time.sleep(1)
+
+    print("Failed URL:", driver.current_url)
+    print("Page title:", driver.title)
+    print("Text sample:", clean(page)[:1800])
+    raise SystemExit(
+        "KKÍ page did not finish rendering. Calendar will NOT be overwritten."
+    )
 
 
-def extract_team_links(row):
-    """Return team names linked from one KKÍ game row, in display order."""
-    teams = []
+def find_keflavik_team_url(league_page):
     anchors = re.findall(
-        r"<a\b([^>]*)>(.*?)</a>", row, flags=re.I | re.S
+        r"<a\b([^>]*)>(.*?)</a>", league_page, flags=re.I | re.S
     )
 
     for attrs, body in anchors:
@@ -83,15 +110,16 @@ def extract_team_links(row):
         if not href_match:
             continue
 
-        href = html.unescape(href_match.group(1)).lower()
-        if "team_id=" not in href and "eitt-lid" not in href:
-            continue
-
+        href = html.unescape(href_match.group(1))
         name = clean(body).strip()
-        if name and (not teams or teams[-1] != name):
-            teams.append(name)
 
-    return teams
+        if "eitt-lid" in href.lower() and "Keflavík" in name:
+            return urljoin(LEAGUE_URL, href)
+
+    raise SystemExit(
+        "Could not find the current Keflavík men's team link on KKÍ. "
+        "Calendar will NOT be overwritten."
+    )
 
 
 def ical_escape(value):
@@ -123,21 +151,45 @@ def fold(line):
     return "\r\n ".join(output)
 
 
-page = render_current_games_page()
-page_text = clean(page)
+driver = make_driver()
+try:
+    league_page = load_and_wait(
+        driver,
+        LEAGUE_URL,
+        ["Bónus deild karla", TARGET_SEASON, "Keflavík"],
+    )
+    team_url = find_keflavik_team_url(league_page)
+    print("Current Keflavík team page:", team_url)
 
-if "Bónus deild karla" not in page_text or TARGET_SEASON not in page_text:
+    team_page = load_and_wait(
+        driver,
+        team_url,
+        ["Bónus deild karla", TARGET_SEASON, "Keflavík", "Leikjaplan og úrslit"],
+    )
+finally:
+    driver.quit()
+
+team_text = clean(team_page)
+if (
+    "Bónus deild karla" not in team_text
+    or TARGET_SEASON not in team_text
+    or "Keflavík" not in team_text
+):
     raise SystemExit(
-        "Wrong KKÍ competition or season. Calendar will NOT be overwritten."
+        "Wrong KKÍ team/competition/season. Calendar will NOT be overwritten."
     )
 
-rows = re.findall(r"<tr\b[^>]*>(.*?)</tr>", page, flags=re.I | re.S)
+rows = re.findall(r"<tr\b[^>]*>(.*?)</tr>", team_page, flags=re.I | re.S)
 events = []
-keflavik_debug = []
+parsed_rows = []
 
 for row in rows:
     row_text = clean(row)
-    if "Keflavík" not in row_text:
+    date_match = re.search(
+        r"(\d{2})[-.](\d{2})[-.](20\d{2})\s+(\d{1,2}):(\d{2})",
+        row_text,
+    )
+    if not date_match:
         continue
 
     cells = [
@@ -148,39 +200,48 @@ for row in rows:
             flags=re.I | re.S,
         )
     ]
+    parsed_rows.append(cells)
 
-    date_match = re.search(
-        r"(\d{2})[-.](\d{2})[-.](20\d{2})\s+(\d{1,2}):(\d{2})",
-        row_text,
-    )
-    if not date_match:
+    # On a KKÍ team page, the opponent column is displayed as either
+    # "gegn Opponent" (home) or "@ Opponent" (away).
+    matchup = None
+    for cell in cells:
+        stripped = cell.strip()
+        if stripped.startswith("@") or stripped.lower().startswith("gegn "):
+            matchup = stripped
+            break
+
+    if not matchup:
         continue
 
-    teams = extract_team_links(row)
-    keflavik_debug.append((cells, teams))
-
-    # The team pages are the most stable identifiers in KKÍ's rendered rows.
-    # A normal game row contains the home-team link first and away-team link second.
-    if len(teams) < 2:
-        continue
-
-    home = teams[0].strip()
-    away = teams[1].strip()
-
-    # We have already verified this is Bónus deild karla, so any Keflavík
-    # team link on this page is the men's first team.
-    if "Keflavík" not in home and "Keflavík" not in away:
-        continue
-
-    # Normalize the exact calendar display name while retaining opponent names.
-    if "Keflavík" in home:
-        home = "Keflavík"
-    if "Keflavík" in away:
+    if matchup.startswith("@"):
+        opponent = matchup[1:].strip()
+        home = opponent
         away = "Keflavík"
+    else:
+        opponent = re.sub(r"^gegn\s+", "", matchup, flags=re.I).strip()
+        home = "Keflavík"
+        away = opponent
 
-    venue = cells[-1].strip() if cells else ""
-    if venue in {home, away, "Sýnishorn"}:
-        venue = ""
+    if not opponent:
+        continue
+
+    # Venue is normally the last useful cell. Ignore score/preview cells.
+    venue = ""
+    for cell in reversed(cells):
+        candidate = cell.strip()
+        if not candidate or candidate == matchup:
+            continue
+        if re.fullmatch(r"-", candidate):
+            continue
+        if re.fullmatch(r"\d+\s*[:\-]\s*\d+", candidate):
+            continue
+        if re.search(r"\d{2}[-.]\d{2}[-.]20\d{2}", candidate):
+            continue
+        if candidate.lower() in {"sýnishorn", "úrslit"}:
+            continue
+        venue = candidate
+        break
 
     day, month, year, hour, minute = map(int, date_match.groups())
     start = datetime.datetime(
@@ -213,10 +274,9 @@ for event in events:
 events = sorted(unique.values(), key=lambda event: event["start"])
 
 if not events:
-    print("Found table rows:", len(rows))
-    for cells, teams in keflavik_debug[:8]:
-        print("KEFLAVIK ROW CELLS:", repr(cells))
-        print("KEFLAVIK TEAM LINKS:", repr(teams))
+    print("Dated team rows found:", len(parsed_rows))
+    for cells in parsed_rows[:10]:
+        print("TEAM ROW:", repr(cells))
     raise SystemExit(
         "No Keflavík MEN Bónus deild games found. "
         "Calendar will NOT be overwritten."
@@ -258,7 +318,7 @@ for event in events:
         lines.append(f"LOCATION:{ical_escape(event['venue'])}")
 
     lines += [
-        f"URL:{SOURCE}",
+        f"URL:{team_url}",
         "STATUS:CONFIRMED",
         "END:VEVENT",
     ]
