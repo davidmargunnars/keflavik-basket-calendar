@@ -4,6 +4,8 @@ import pathlib
 import re
 import html
 import hashlib
+import shutil
+import subprocess
 
 OUT = pathlib.Path("keflavik-basket.ics")
 BASE = "https://www.kki.is/motamal/leikir-og-urslit/motayfirlit"
@@ -30,6 +32,42 @@ def fetch(url):
         return response.read().decode("utf-8", "replace")
 
 
+def render(url):
+    chrome = (
+        shutil.which("google-chrome")
+        or shutil.which("google-chrome-stable")
+        or shutil.which("chromium")
+        or shutil.which("chromium-browser")
+    )
+    if not chrome:
+        raise RuntimeError("Chrome/Chromium is not available on the runner")
+
+    command = [
+        chrome,
+        "--headless=new",
+        "--no-sandbox",
+        "--disable-gpu",
+        "--disable-dev-shm-usage",
+        "--hide-scrollbars",
+        "--virtual-time-budget=7000",
+        "--dump-dom",
+        url,
+    ]
+    result = subprocess.run(
+        command,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    if result.returncode != 0 or not result.stdout.strip():
+        raise RuntimeError(
+            "Chrome failed to render KKÍ page: "
+            + result.stderr[-1000:]
+        )
+    return result.stdout
+
+
 def clean(value):
     value = re.sub(r"<br\s*/?>", " ", value, flags=re.I)
     value = re.sub(r"<[^>]+>", " ", value)
@@ -51,7 +89,6 @@ def ical_escape(value):
 def fold(line):
     data = line.encode("utf-8")
     output = []
-
     while len(data) > 73:
         cut = 73
         while cut > 0:
@@ -62,7 +99,6 @@ def fold(line):
                 cut -= 1
         output.append(part)
         data = data[cut:]
-
     output.append(data.decode("utf-8"))
     return "\r\n ".join(output)
 
@@ -70,12 +106,7 @@ def fold(line):
 def season_candidates(page):
     candidates = []
 
-    # Season links used around the KKÍ competition pages.
-    candidates.extend(
-        re.findall(r"season_id=(\d+)", page, flags=re.I)
-    )
-
-    # Season dropdown option containing the target season label.
+    # Give priority to dropdown options explicitly labelled 2026-2027.
     for option in re.findall(
         r"<option\b[^>]*>.*?</option>",
         page,
@@ -89,9 +120,13 @@ def season_candidates(page):
             flags=re.I,
         )
         if match:
-            candidates.insert(0, match.group(1))
+            candidates.append(match.group(1))
 
-    # Preserve order while removing duplicates and clearly invalid ids.
+    # Then add any season ids exposed in rendered links/scripts.
+    candidates.extend(
+        re.findall(r"season_id(?:=|%3D)(\d+)", page, flags=re.I)
+    )
+
     unique = []
     seen = set()
     for value in candidates:
@@ -104,29 +139,33 @@ def season_candidates(page):
 
 
 def find_current_games_page():
-    bootstrap = fetch(BOOTSTRAP)
+    bootstrap = render(BOOTSTRAP)
     bootstrap_text = clean(bootstrap)
 
     if "Bónus deild karla" not in bootstrap_text:
         raise SystemExit(
-            "Could not confirm Bónus deild karla on KKÍ. "
+            "Rendered KKÍ page did not confirm Bónus deild karla. "
             "Calendar will NOT be overwritten."
         )
 
     candidates = season_candidates(bootstrap)
+    print(f"KKÍ season candidates: {candidates[:12]}")
+
     if not candidates:
         raise SystemExit(
-            "Could not discover a KKÍ season_id. "
+            "Could not discover a KKÍ season_id after rendering. "
             "Calendar will NOT be overwritten."
         )
 
-    for season_id in candidates:
+    # Usually the current season is first. Limit browser renders to avoid
+    # hammering KKÍ if old seasons are also present in the selector.
+    for season_id in candidates[:12]:
         url = (
             f"{BASE}/Leikir?league_id={LEAGUE_ID}"
             f"&season_id={season_id}"
         )
         try:
-            page = fetch(url)
+            page = render(url)
         except Exception as exc:
             print(f"Skipping season_id={season_id}: {exc}")
             continue
@@ -167,11 +206,9 @@ for row in rows:
             flags=re.I | re.S,
         )
     ]
-
     if not cells:
         continue
 
-    # KKÍ game rows are Date | Home | Score/Preview | Away | Venue.
     date_index = None
     date_match = None
     for i, cell in enumerate(cells):
@@ -187,11 +224,10 @@ for row in rows:
 
     if date_index is None or date_match is None:
         continue
-
-    # We need Home, middle status/score, Away after the date column.
     if len(cells) <= date_index + 3:
         continue
 
+    # KKÍ game rows: Date | Home | Score/Preview | Away | Venue.
     home = cells[date_index + 1].strip()
     away = cells[date_index + 3].strip()
     venue = (
@@ -200,17 +236,15 @@ for row in rows:
         else ""
     )
 
-    # Only the Keflavík men's first team. Exact name prevents b/youth teams.
+    # Exact name means men's first team only: no b/youth teams.
     if home != "Keflavík" and away != "Keflavík":
         continue
 
     day, month, year = map(int, date_match.group(1, 2, 3))
-    hour = int(date_match.group(4) or 0)
-    minute = int(date_match.group(5) or 0)
-
-    # A game without a published tip-off time is not safe to add yet.
     if date_match.group(4) is None:
         continue
+    hour = int(date_match.group(4))
+    minute = int(date_match.group(5))
 
     start = datetime.datetime(
         year,
@@ -238,22 +272,13 @@ for row in rows:
         }
     )
 
-# Remove duplicates.
 unique = {}
 for event in events:
-    key = (
-        event["start"],
-        event["home"],
-        event["away"],
-    )
+    key = (event["start"], event["home"], event["away"])
     unique[key] = event
 
-events = sorted(
-    unique.values(),
-    key=lambda event: event["start"],
-)
+events = sorted(unique.values(), key=lambda event: event["start"])
 
-# Never overwrite a working calendar with an empty one if KKÍ changes HTML.
 if not events:
     raise SystemExit(
         "No Keflavík MEN Bónus deild games found. "
@@ -279,13 +304,9 @@ lines = [
 for event in events:
     start = event["start"]
     end = start + datetime.timedelta(hours=2)
-
     lines += [
         "BEGIN:VEVENT",
-        (
-            f"UID:kki-{event['uid']}"
-            "@keflavik-basket-calendar"
-        ),
+        f"UID:kki-{event['uid']}@keflavik-basket-calendar",
         f"DTSTAMP:{now}",
         f"DTSTART:{start.strftime('%Y%m%dT%H%M%SZ')}",
         f"DTEND:{end.strftime('%Y%m%dT%H%M%SZ')}",
@@ -299,12 +320,8 @@ for event in events:
             "opinber leikjadagskrá KKÍ"
         ),
     ]
-
     if event["venue"]:
-        lines.append(
-            f"LOCATION:{ical_escape(event['venue'])}"
-        )
-
+        lines.append(f"LOCATION:{ical_escape(event['venue'])}")
     lines += [
         f"URL:{SOURCE}",
         "STATUS:CONFIRMED",
@@ -314,8 +331,7 @@ for event in events:
 lines.append("END:VCALENDAR")
 
 OUT.write_text(
-    "\r\n".join(fold(line) for line in lines)
-    + "\r\n",
+    "\r\n".join(fold(line) for line in lines) + "\r\n",
     encoding="utf-8",
 )
 
