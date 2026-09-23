@@ -1,0 +1,70 @@
+BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//Keflavik Basket Calendar//IS
+CALSCALE:GREGORIAN
+METHOD:PUBLISH
+X-WR-CALNAME:Keflavík – Bónus deild karla
+X-WR-TIMEZONE:Atlantic/Reykjavik
+REFRESH-INTERVAL;VALUE=DURATION:PT6H
+X-PUBLISHED-TTL:PT6H
+BEGIN:VEVENT
+UID:kki-282b77b43595aec2@keflavik-basket-calendar
+DTSTAMP:20260923T215444Z
+DTSTART:20261008T191500Z
+DTEND:20261008T211500Z
+SUMMARY:🏀 Ármann – Keflavík
+DESCRIPTION:Bónus deild karla – opinber leikjadagskrá KKÍ
+LOCATION:Laugardalshöll if (typeof document.getElementById("a-0.21982500
+ 1790200484") === "object") { document.getElementById("a-0.219825001790200
+ 484").href = navigateArena(document.getElementById('a-0.21982500179020048
+ 4').getAttribute('arena_id'))\; }
+URL:https://www.kki.is/motamal/leikir-og-urslit/motayfirlit/Leikir?league
+ _id=190&season_id=undefined
+STATUS:CONFIRMED
+END:VEVENT
+BEGIN:VEVENT
+UID:kki-e452ef4b60131fff@keflavik-basket-calendar
+DTSTAMP:20260923T215444Z
+DTSTART:20261015T191500Z
+DTEND:20261015T211500Z
+SUMMARY:🏀 Keflavík – Sindri
+DESCRIPTION:Bónus deild karla – opinber leikjadagskrá KKÍ
+LOCATION:Blue-höllin if (typeof document.getElementById("a-0.22024400179
+ 0200484") === "object") { document.getElementById("a-0.220244001790200484
+ ").href = navigateArena(document.getElementById('a-0.220244001790200484')
+ .getAttribute('arena_id'))\; }
+URL:https://www.kki.is/motamal/leikir-og-urslit/motayfirlit/Leikir?league
+ _id=190&season_id=undefined
+STATUS:CONFIRMED
+END:VEVENT
+BEGIN:VEVENT
+UID:kki-bd2d4871b11e2b2b@keflavik-basket-calendar
+DTSTAMP:20260923T215444Z
+DTSTART:20261023T193000Z
+DTEND:20261023T213000Z
+SUMMARY:🏀 Álftanes – Keflavík
+DESCRIPTION:Bónus deild karla – opinber leikjadagskrá KKÍ
+LOCATION:Kaldalónshöllin if (typeof document.getElementById("a-0.220854
+ 001790200484") === "object") { document.getElementById("a-0.2208540017902
+ 00484").href = navigateArena(document.getElementById('a-0.220854001790200
+ 484').getAttribute('arena_id'))\; }
+URL:https://www.kki.is/motamal/leikir-og-urslit/motayfirlit/Leikir?league
+ _id=190&season_id=undefined
+STATUS:CONFIRMED
+END:VEVENT
+BEGIN:VEVENT
+UID:kki-4c038484e691e6fa@keflavik-basket-calendar
+DTSTAMP:20260923T215444Z
+DTSTART:20261029T191500Z
+DTEND:20261029T211500Z
+SUMMARY:🏀 Keflavík – Höttur
+DESCRIPTION:Bónus deild karla – opinber leikjadagskrá KKÍ
+LOCATION:Blue-höllin if (typeof document.getElementById("a-0.22091800179
+ 0200484") === "object") { document.getElementById("a-0.220918001790200484
+ ").href = navigateArena(document.getElementById('a-0.220918001790200484')
+ .getAttribute('arena_id'))\; }
+URL:https://www.kki.is/motamal/leikir-og-urslit/motayfirlit/Leikir?league
+ _id=190&season_id=undefined
+STATUS:CONFIRMED
+END:VEVENT
+END:VCALENDAR
