@@ -6,11 +6,12 @@ import html
 import hashlib
 
 OUT = pathlib.Path("keflavik-basket.ics")
-
-# KKÍ: Bónus deild karla
-SOURCE = (
-    "https://www.kki.is/motamal/leikir-og-urslit/"
-    "motayfirlit/Leikir?league_id=190&season_id=undefined"
+BASE = "https://www.kki.is/motamal/leikir-og-urslit/motayfirlit"
+LEAGUE_ID = 190  # Bónus deild karla
+TARGET_SEASON = "2026-2027"
+BOOTSTRAP = (
+    f"{BASE}/Tolfraedi-leikmanna?"
+    f"league_id={LEAGUE_ID}&season_id=undefined"
 )
 
 
@@ -20,7 +21,7 @@ def fetch(url):
         headers={
             "User-Agent": (
                 "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                "AppleWebKit/537.36 Chrome/140 Safari/537.36"
+                "AppleWebKit/537.36 Chrome/153 Safari/537.36"
             ),
             "Accept-Language": "is-IS,is;q=0.9,en;q=0.8",
         },
@@ -53,14 +54,12 @@ def fold(line):
 
     while len(data) > 73:
         cut = 73
-
         while cut > 0:
             try:
                 part = data[:cut].decode("utf-8")
                 break
             except UnicodeDecodeError:
                 cut -= 1
-
         output.append(part)
         data = data[cut:]
 
@@ -68,17 +67,89 @@ def fold(line):
     return "\r\n ".join(output)
 
 
-page = fetch(SOURCE)
-page_text = clean(page)
+def season_candidates(page):
+    candidates = []
 
-# ÖRYGGI:
-# Dagatalið má ALDREI sækja kvennadeild eða aðra keppni.
-if "Bónus deild karla" not in page_text:
+    # Season links used around the KKÍ competition pages.
+    candidates.extend(
+        re.findall(r"season_id=(\d+)", page, flags=re.I)
+    )
+
+    # Season dropdown option containing the target season label.
+    for option in re.findall(
+        r"<option\b[^>]*>.*?</option>",
+        page,
+        flags=re.I | re.S,
+    ):
+        if TARGET_SEASON not in clean(option):
+            continue
+        match = re.search(
+            r"\bvalue\s*=\s*[\"']?(\d+)",
+            option,
+            flags=re.I,
+        )
+        if match:
+            candidates.insert(0, match.group(1))
+
+    # Preserve order while removing duplicates and clearly invalid ids.
+    unique = []
+    seen = set()
+    for value in candidates:
+        if value in seen:
+            continue
+        seen.add(value)
+        if int(value) > 1000:
+            unique.append(value)
+    return unique
+
+
+def find_current_games_page():
+    bootstrap = fetch(BOOTSTRAP)
+    bootstrap_text = clean(bootstrap)
+
+    if "Bónus deild karla" not in bootstrap_text:
+        raise SystemExit(
+            "Could not confirm Bónus deild karla on KKÍ. "
+            "Calendar will NOT be overwritten."
+        )
+
+    candidates = season_candidates(bootstrap)
+    if not candidates:
+        raise SystemExit(
+            "Could not discover a KKÍ season_id. "
+            "Calendar will NOT be overwritten."
+        )
+
+    for season_id in candidates:
+        url = (
+            f"{BASE}/Leikir?league_id={LEAGUE_ID}"
+            f"&season_id={season_id}"
+        )
+        try:
+            page = fetch(url)
+        except Exception as exc:
+            print(f"Skipping season_id={season_id}: {exc}")
+            continue
+
+        page_text = clean(page)
+        correct_competition = "Bónus deild karla" in page_text
+        correct_season = TARGET_SEASON in page_text
+        has_keflavik = "Keflavík" in page_text
+
+        if correct_competition and correct_season and has_keflavik:
+            print(
+                f"Using KKÍ season_id={season_id} "
+                f"for Bónus deild karla {TARGET_SEASON}"
+            )
+            return url, page
+
     raise SystemExit(
-        "KKÍ page is not Bónus deild karla. "
+        "Could not find the current Bónus deild karla games page. "
         "Calendar will NOT be overwritten."
     )
 
+
+SOURCE, page = find_current_games_page()
 rows = re.findall(
     r"<tr\b[^>]*>(.*?)</tr>",
     page,
@@ -88,34 +159,6 @@ rows = re.findall(
 events = []
 
 for row in rows:
-    row_text = clean(row)
-
-    # Bara Keflavík
-    if "Keflavík" not in row_text:
-        continue
-
-    # Ekki Keflavík b, yngri flokkar o.s.frv.
-    if re.search(
-        r"Keflavík\s+(?:b\b|c\b|\d+\.fl|MB\d|U\d)",
-        row_text,
-        re.I,
-    ):
-        continue
-
-    # Finna dagsetningu og tíma
-    match = re.search(
-        r"(\d{2})[-.](\d{2})[-.](20\d{2})\s+"
-        r"(\d{1,2}):(\d{2})",
-        row_text,
-    )
-
-    if not match:
-        continue
-
-    day, month, year, hour, minute = map(
-        int, match.groups()
-    )
-
     cells = [
         clean(cell)
         for cell in re.findall(
@@ -125,67 +168,50 @@ for row in rows:
         )
     ]
 
-    # Leita að Keflavík sem nákvæmu liðsnafni
-    keflavik_positions = [
-        i for i, cell in enumerate(cells)
-        if cell.strip() == "Keflavík"
-    ]
-
-    if not keflavik_positions:
+    if not cells:
         continue
 
-    # Finna líkleg liðsnöfn í röðinni
-    team_cells = []
-
-    for cell in cells:
-        cell = cell.strip()
-
-        if not cell:
-            continue
-
-        # Sleppa dagsetningum
-        if re.fullmatch(
-            r"\d{2}[-.]\d{2}[-.]20\d{2}\s+\d{1,2}:\d{2}",
+    # KKÍ game rows are Date | Home | Score/Preview | Away | Venue.
+    date_index = None
+    date_match = None
+    for i, cell in enumerate(cells):
+        match = re.search(
+            r"(\d{2})[-.](\d{2})[-.](20\d{2})"
+            r"(?:\s+(\d{1,2}):(\d{2}))?",
             cell,
-        ):
-            continue
+        )
+        if match:
+            date_index = i
+            date_match = match
+            break
 
-        # Sleppa úrslitatölum
-        if re.fullmatch(r"\d+\s*[-:]\s*\d+", cell):
-            continue
-
-        if re.search(
-            r"[A-Za-zÁÉÍÓÚÝÞÆÖÐáéíóúýþæöð]",
-            cell,
-        ):
-            team_cells.append(cell)
-
-    try:
-        k = team_cells.index("Keflavík")
-    except ValueError:
+    if date_index is None or date_match is None:
         continue
 
-    # KKÍ röðin á að innihalda bæði liðin.
-    if k > 0:
-        home = team_cells[k - 1]
-        away = "Keflavík"
-    elif len(team_cells) > 1:
-        home = "Keflavík"
-        away = team_cells[1]
-    else:
+    # We need Home, middle status/score, Away after the date column.
+    if len(cells) <= date_index + 3:
         continue
 
-    bad_labels = {
-        "Dagskrá",
-        "Leikir",
-        "Bónus deild karla",
-        "Deildarkeppni",
-    }
+    home = cells[date_index + 1].strip()
+    away = cells[date_index + 3].strip()
+    venue = (
+        cells[date_index + 4].strip()
+        if len(cells) > date_index + 4
+        else ""
+    )
 
-    if home in bad_labels or away in bad_labels:
+    # Only the Keflavík men's first team. Exact name prevents b/youth teams.
+    if home != "Keflavík" and away != "Keflavík":
         continue
 
-    # Ísland er UTC allt árið.
+    day, month, year = map(int, date_match.group(1, 2, 3))
+    hour = int(date_match.group(4) or 0)
+    minute = int(date_match.group(5) or 0)
+
+    # A game without a published tip-off time is not safe to add yet.
+    if date_match.group(4) is None:
+        continue
+
     start = datetime.datetime(
         year,
         month,
@@ -196,9 +222,8 @@ for row in rows:
     )
 
     uid_source = (
-        f"{year}-{month}-{day}-{home}-{away}"
+        f"{year}-{month}-{day}-{hour}-{minute}-{home}-{away}"
     )
-
     uid = hashlib.sha1(
         uid_source.encode("utf-8")
     ).hexdigest()[:16]
@@ -208,14 +233,13 @@ for row in rows:
             "start": start,
             "home": home,
             "away": away,
+            "venue": venue,
             "uid": uid,
         }
     )
 
-
-# Fjarlægja duplicates
+# Remove duplicates.
 unique = {}
-
 for event in events:
     key = (
         event["start"],
@@ -229,20 +253,16 @@ events = sorted(
     key=lambda event: event["start"],
 )
 
-
-# Mjög mikilvægt:
-# Ekki skrifa tómt dagatal ef KKÍ breytir vefsíðunni.
+# Never overwrite a working calendar with an empty one if KKÍ changes HTML.
 if not events:
     raise SystemExit(
         "No Keflavík MEN Bónus deild games found. "
         "Calendar will NOT be overwritten."
     )
 
-
 now = datetime.datetime.now(
     datetime.timezone.utc
 ).strftime("%Y%m%dT%H%M%SZ")
-
 
 lines = [
     "BEGIN:VCALENDAR",
@@ -256,9 +276,7 @@ lines = [
     "X-PUBLISHED-TTL:PT6H",
 ]
 
-
 for event in events:
-
     start = event["start"]
     end = start + datetime.timedelta(hours=2)
 
@@ -280,21 +298,26 @@ for event in events:
             "DESCRIPTION:Bónus deild karla – "
             "opinber leikjadagskrá KKÍ"
         ),
+    ]
+
+    if event["venue"]:
+        lines.append(
+            f"LOCATION:{ical_escape(event['venue'])}"
+        )
+
+    lines += [
         f"URL:{SOURCE}",
         "STATUS:CONFIRMED",
         "END:VEVENT",
     ]
 
-
 lines.append("END:VCALENDAR")
-
 
 OUT.write_text(
     "\r\n".join(fold(line) for line in lines)
     + "\r\n",
     encoding="utf-8",
 )
-
 
 print(
     f"Wrote {len(events)} Keflavík MEN "
