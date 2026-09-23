@@ -292,8 +292,8 @@ lines = [
     "METHOD:PUBLISH",
     "X-WR-CALNAME:Keflavík – Bónus deild karla",
     "X-WR-TIMEZONE:Atlantic/Reykjavik",
-    "REFRESH-INTERVAL;VALUE=DURATION:PT6H",
-    "X-PUBLISHED-TTL:PT6H",
+    "REFRESH-INTERVAL;VALUE=DURATION:PT1H",
+    "X-PUBLISHED-TTL:PT1H",
 ]
 
 for event in events:
