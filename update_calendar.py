@@ -1,71 +1,21 @@
-import urllib.request
 import datetime
+import hashlib
+import html
 import pathlib
 import re
-import html
-import hashlib
-import shutil
-import subprocess
+import time
+
+from selenium import webdriver
+from selenium.common.exceptions import TimeoutException
+from selenium.webdriver.chrome.options import Options
 
 OUT = pathlib.Path("keflavik-basket.ics")
-BASE = "https://www.kki.is/motamal/leikir-og-urslit/motayfirlit"
 LEAGUE_ID = 190  # Bónus deild karla
 TARGET_SEASON = "2026-2027"
-BOOTSTRAP = (
-    f"{BASE}/Tolfraedi-leikmanna?"
-    f"league_id={LEAGUE_ID}&season_id=undefined"
+SOURCE = (
+    "https://www.kki.is/motamal/leikir-og-urslit/"
+    "motayfirlit/Leikir?league_id=190&season_id=undefined"
 )
-
-
-def fetch(url):
-    req = urllib.request.Request(
-        url,
-        headers={
-            "User-Agent": (
-                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                "AppleWebKit/537.36 Chrome/153 Safari/537.36"
-            ),
-            "Accept-Language": "is-IS,is;q=0.9,en;q=0.8",
-        },
-    )
-    with urllib.request.urlopen(req, timeout=30) as response:
-        return response.read().decode("utf-8", "replace")
-
-
-def render(url):
-    chrome = (
-        shutil.which("google-chrome")
-        or shutil.which("google-chrome-stable")
-        or shutil.which("chromium")
-        or shutil.which("chromium-browser")
-    )
-    if not chrome:
-        raise RuntimeError("Chrome/Chromium is not available on the runner")
-
-    command = [
-        chrome,
-        "--headless=new",
-        "--no-sandbox",
-        "--disable-gpu",
-        "--disable-dev-shm-usage",
-        "--hide-scrollbars",
-        "--virtual-time-budget=7000",
-        "--dump-dom",
-        url,
-    ]
-    result = subprocess.run(
-        command,
-        capture_output=True,
-        text=True,
-        timeout=60,
-        check=False,
-    )
-    if result.returncode != 0 or not result.stdout.strip():
-        raise RuntimeError(
-            "Chrome failed to render KKÍ page: "
-            + result.stderr[-1000:]
-        )
-    return result.stdout
 
 
 def clean(value):
@@ -74,6 +24,56 @@ def clean(value):
     return " ".join(
         html.unescape(value).replace("\xa0", " ").split()
     )
+
+
+def render_current_games_page():
+    options = Options()
+    options.add_argument("--headless=new")
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-gpu")
+    options.add_argument("--disable-dev-shm-usage")
+    options.add_argument("--window-size=1440,1200")
+    options.add_argument("--lang=is-IS")
+    options.page_load_strategy = "eager"
+
+    driver = webdriver.Chrome(options=options)
+    driver.set_page_load_timeout(25)
+
+    try:
+        try:
+            driver.get(SOURCE)
+        except TimeoutException:
+            # KKÍ can keep background requests open. The useful DOM may still
+            # be fully rendered, so stop navigation and inspect it ourselves.
+            try:
+                driver.execute_script("window.stop();")
+            except Exception:
+                pass
+
+        # Wait for KKÍ's competition widget to populate. We deliberately
+        # validate both competition and season before writing anything.
+        page = ""
+        for _ in range(20):
+            page = driver.page_source
+            text = clean(page)
+            if (
+                "Bónus deild karla" in text
+                and TARGET_SEASON in text
+                and "Keflavík" in text
+                and re.search(r"\d{2}[-.]\d{2}[-.]20\d{2}", text)
+            ):
+                return page
+            time.sleep(1)
+
+        print("Rendered page title:", driver.title)
+        print("Rendered URL:", driver.current_url)
+        print("Rendered text sample:", clean(page)[:1500])
+        raise SystemExit(
+            "KKÍ did not render current Bónus deild karla games. "
+            "Calendar will NOT be overwritten."
+        )
+    finally:
+        driver.quit()
 
 
 def ical_escape(value):
@@ -89,6 +89,7 @@ def ical_escape(value):
 def fold(line):
     data = line.encode("utf-8")
     output = []
+
     while len(data) > 73:
         cut = 73
         while cut > 0:
@@ -99,96 +100,19 @@ def fold(line):
                 cut -= 1
         output.append(part)
         data = data[cut:]
+
     output.append(data.decode("utf-8"))
     return "\r\n ".join(output)
 
 
-def season_candidates(page):
-    candidates = []
+page = render_current_games_page()
+page_text = clean(page)
 
-    # Give priority to dropdown options explicitly labelled 2026-2027.
-    for option in re.findall(
-        r"<option\b[^>]*>.*?</option>",
-        page,
-        flags=re.I | re.S,
-    ):
-        if TARGET_SEASON not in clean(option):
-            continue
-        match = re.search(
-            r"\bvalue\s*=\s*[\"']?(\d+)",
-            option,
-            flags=re.I,
-        )
-        if match:
-            candidates.append(match.group(1))
-
-    # Then add any season ids exposed in rendered links/scripts.
-    candidates.extend(
-        re.findall(r"season_id(?:=|%3D)(\d+)", page, flags=re.I)
-    )
-
-    unique = []
-    seen = set()
-    for value in candidates:
-        if value in seen:
-            continue
-        seen.add(value)
-        if int(value) > 1000:
-            unique.append(value)
-    return unique
-
-
-def find_current_games_page():
-    bootstrap = render(BOOTSTRAP)
-    bootstrap_text = clean(bootstrap)
-
-    if "Bónus deild karla" not in bootstrap_text:
-        raise SystemExit(
-            "Rendered KKÍ page did not confirm Bónus deild karla. "
-            "Calendar will NOT be overwritten."
-        )
-
-    candidates = season_candidates(bootstrap)
-    print(f"KKÍ season candidates: {candidates[:12]}")
-
-    if not candidates:
-        raise SystemExit(
-            "Could not discover a KKÍ season_id after rendering. "
-            "Calendar will NOT be overwritten."
-        )
-
-    # Usually the current season is first. Limit browser renders to avoid
-    # hammering KKÍ if old seasons are also present in the selector.
-    for season_id in candidates[:12]:
-        url = (
-            f"{BASE}/Leikir?league_id={LEAGUE_ID}"
-            f"&season_id={season_id}"
-        )
-        try:
-            page = render(url)
-        except Exception as exc:
-            print(f"Skipping season_id={season_id}: {exc}")
-            continue
-
-        page_text = clean(page)
-        correct_competition = "Bónus deild karla" in page_text
-        correct_season = TARGET_SEASON in page_text
-        has_keflavik = "Keflavík" in page_text
-
-        if correct_competition and correct_season and has_keflavik:
-            print(
-                f"Using KKÍ season_id={season_id} "
-                f"for Bónus deild karla {TARGET_SEASON}"
-            )
-            return url, page
-
+if "Bónus deild karla" not in page_text or TARGET_SEASON not in page_text:
     raise SystemExit(
-        "Could not find the current Bónus deild karla games page. "
-        "Calendar will NOT be overwritten."
+        "Wrong KKÍ competition or season. Calendar will NOT be overwritten."
     )
 
-
-SOURCE, page = find_current_games_page()
 rows = re.findall(
     r"<tr\b[^>]*>(.*?)</tr>",
     page,
@@ -211,23 +135,24 @@ for row in rows:
 
     date_index = None
     date_match = None
-    for i, cell in enumerate(cells):
+    for index, cell in enumerate(cells):
         match = re.search(
-            r"(\d{2})[-.](\d{2})[-.](20\d{2})"
-            r"(?:\s+(\d{1,2}):(\d{2}))?",
+            r"(\d{2})[-.](\d{2})[-.](20\d{2})\s+"
+            r"(\d{1,2}):(\d{2})",
             cell,
         )
         if match:
-            date_index = i
+            date_index = index
             date_match = match
             break
 
     if date_index is None or date_match is None:
         continue
+
+    # KKÍ's games table is Date | Home | Score/Preview | Away | Venue.
     if len(cells) <= date_index + 3:
         continue
 
-    # KKÍ game rows: Date | Home | Score/Preview | Away | Venue.
     home = cells[date_index + 1].strip()
     away = cells[date_index + 3].strip()
     venue = (
@@ -236,16 +161,12 @@ for row in rows:
         else ""
     )
 
-    # Exact name means men's first team only: no b/youth teams.
+    # Exact team name is intentional: only Keflavík men's first team,
+    # never Keflavík b, youth teams, or women's teams.
     if home != "Keflavík" and away != "Keflavík":
         continue
 
-    day, month, year = map(int, date_match.group(1, 2, 3))
-    if date_match.group(4) is None:
-        continue
-    hour = int(date_match.group(4))
-    minute = int(date_match.group(5))
-
+    day, month, year, hour, minute = map(int, date_match.groups())
     start = datetime.datetime(
         year,
         month,
@@ -258,9 +179,7 @@ for row in rows:
     uid_source = (
         f"{year}-{month}-{day}-{hour}-{minute}-{home}-{away}"
     )
-    uid = hashlib.sha1(
-        uid_source.encode("utf-8")
-    ).hexdigest()[:16]
+    uid = hashlib.sha1(uid_source.encode("utf-8")).hexdigest()[:16]
 
     events.append(
         {
@@ -272,6 +191,7 @@ for row in rows:
         }
     )
 
+# Remove duplicate rows if KKÍ includes the same game in multiple sections.
 unique = {}
 for event in events:
     key = (event["start"], event["home"], event["away"])
@@ -280,14 +200,13 @@ for event in events:
 events = sorted(unique.values(), key=lambda event: event["start"])
 
 if not events:
+    print("Found rows:", len(rows))
     raise SystemExit(
         "No Keflavík MEN Bónus deild games found. "
         "Calendar will NOT be overwritten."
     )
 
-now = datetime.datetime.now(
-    datetime.timezone.utc
-).strftime("%Y%m%dT%H%M%SZ")
+now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
 lines = [
     "BEGIN:VCALENDAR",
@@ -304,6 +223,7 @@ lines = [
 for event in events:
     start = event["start"]
     end = start + datetime.timedelta(hours=2)
+
     lines += [
         "BEGIN:VEVENT",
         f"UID:kki-{event['uid']}@keflavik-basket-calendar",
@@ -315,13 +235,12 @@ for event in events:
             f"{ical_escape(event['home'])} – "
             f"{ical_escape(event['away'])}"
         ),
-        (
-            "DESCRIPTION:Bónus deild karla – "
-            "opinber leikjadagskrá KKÍ"
-        ),
+        "DESCRIPTION:Bónus deild karla – opinber leikjadagskrá KKÍ",
     ]
+
     if event["venue"]:
         lines.append(f"LOCATION:{ical_escape(event['venue'])}")
+
     lines += [
         f"URL:{SOURCE}",
         "STATUS:CONFIRMED",
